@@ -7,24 +7,15 @@ import sqlite3
 from datetime import datetime
 from flask import Flask, request
 import telebot
-from telebot.types import BotCommand, Message
+from telebot.types import BotCommand, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from keep_alive import keep_alive
-from pyrogram import Client
 
 # === Load environment variables ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-
-# Pyrogram user credentials (for /create)
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-USER_PHONE = os.getenv("USER_PHONE")
-
-# Or if you use a session string instead:
-PYROGRAM_SESSION = os.getenv("PYROGRAM_SESSION")
 
 ASSET_WALLETS = {
     'BTC': os.getenv("BTC_WALLET"),
@@ -42,7 +33,7 @@ if not ETHERSCAN_API_KEY:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Set bot commands
+# === Bot Commands ===
 bot.set_my_commands([
     BotCommand("start", "Start the bot"),
     BotCommand("create", "Create escrow group"),
@@ -62,7 +53,7 @@ bot.set_my_commands([
     BotCommand("help", "How to use the bot")
 ])
 
-# Set bot description with monthly users count
+# === Bot Description ===
 bot.set_my_short_description("P2P Escrow · 3,728 monthly users")
 bot.set_my_description(
     "P2P Escrow Bot provides secure escrow for Telegram trades.\n"
@@ -82,8 +73,8 @@ cursor.execute('''
         buyer_wallet TEXT,
         seller_wallet TEXT,
         asset TEXT,
-        status TEXT,
-        created_at TEXT
+        status TEXT DEFAULT 'initiated',
+        created_at TEXT DEFAULT (datetime('now'))
     )
 ''')
 cursor.execute('''
@@ -94,29 +85,18 @@ cursor.execute('''
         PRIMARY KEY (group_id, user_id)
     )
 ''')
-conn.commit()
-
-# === Lazy Pyrogram Client init ===
-pyro_client = None
-
-def get_pyro_client():
-    global pyro_client
-    if pyro_client is not None:
-        return pyro_client
-    
-    if not API_ID or not API_HASH:
-        return None
-    
-    pyro_client = Client(
-        "user_session",
-        api_id=int(API_ID),
-        api_hash=API_HASH,
-        phone_number=USER_PHONE,
-        session_string=PYROGRAM_SESSION or None,
-        in_memory=True
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS escrow_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER,
+        asset TEXT,
+        amount TEXT,
+        fee TEXT,
+        status TEXT,
+        completed_at TEXT
     )
-    pyro_client.start()
-    return pyro_client
+''')
+conn.commit()
 
 # === Helpers ===
 
@@ -149,133 +129,95 @@ def get_balance(asset, address):
         print(f"[Balance Error] {asset} - {address} -> {e}")
     return None
 
-def generate_group_code():
-    import random, string
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
+def build_main_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        KeyboardButton("/create"),
+        KeyboardButton("/seller"),
+        KeyboardButton("/buyer"),
+        KeyboardButton("/asset"),
+        KeyboardButton("/addpin"),
+        KeyboardButton("/balance"),
+        KeyboardButton("/releasefund"),
+        KeyboardButton("/status"),
+        KeyboardButton("/instructions"),
+        KeyboardButton("/terms"),
+        KeyboardButton("/about"),
+        KeyboardButton("/help")
+    )
+    return markup
 
-# === Bot Commands ===
+# === COMMAND HANDLERS ===
 
 @bot.message_handler(commands=['start'])
 def start_command(message: Message):
-    # Send video
     bot.send_video(chat_id=message.chat.id, video="https://laoder5.wordpress.com/wp-content/uploads/2025/05/7916cb61-9e9d-431b-8121-e5ffcfee4349.mp4")
     
-    # Build inline buttons for quick actions
-    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-    
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("Create Group", callback_data="cmd_create"),
-        InlineKeyboardButton("Instructions", callback_data="cmd_instructions"),
-        InlineKeyboardButton("Terms", callback_data="cmd_terms"),
-        InlineKeyboardButton("About", callback_data="cmd_about")
-    )
-    
-    # Neutral tone welcome text — clean, no emoji overload
     text = (
-        "P2PEscrowBot — Secure Escrow for Telegram Trades\n\n"
-        "3,728 monthly users · 170+ deals completed · 20 disputes resolved\n\n"
-        "How it works:\n"
-        "1. /create — Bot creates a private escrow group\n"
-        "2. Seller & buyer register wallets\n"
-        "3. Buyer sends funds to escrow wallet\n"
-        "4. Both parties agree, funds released to seller\n\n"
-        "Supported assets: BTC, LTC, ETH, USDT (ERC-20)\n"
-        "Fees: 5% (>$100) or $5 flat (<$100)\n\n"
-        "Select an option below to get started."
+        "P2P Escrow Bot · Secure Escrow Service\n\n"
+        "This bot provides a neutral escrow service for P2P transactions on Telegram.\n"
+        "Funds are held securely until both parties agree to release.\n\n"
+        "Getting Started:\n"
+        "  /create - Create a new escrow group\n"
+        "  /seller <address> - Register as seller\n"
+        "  /buyer <address> - Register as buyer\n"
+        "  /asset BTC|LTC|ETH|USDT - Choose asset\n"
+        "  /addpin <PIN> - Set transaction PIN\n"
+        "  /releasefund <PIN> - Release funds to seller\n\n"
+        "Bot Statistics:\n"
+        "  Monthly Users: 3,728\n"
+        "  Deals Completed: 170\n"
+        "  Disputes Resolved: 20\n\n"
+        "Fees:\n"
+        "  5% for amounts over $100\n"
+        "  $5 flat fee for amounts under $100\n\n"
+        "Supported Assets: BTC, LTC, ETH, USDT (ERC-20)\n\n"
+        "Use /instructions for a detailed step-by-step guide.\n"
+        "Use /terms to read the terms of service.\n"
+        "Use /help for quick assistance."
     )
-    bot.send_message(message.chat.id, text, reply_markup=markup)
-
-# Callback handler for inline buttons
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    cmd = call.data.replace("cmd_", "")
-    if cmd == "create":
-        # Fake a message object and call the create handler
-        call.message.text = "/create"
-        create_escrow_group(call.message)
-    elif cmd == "instructions":
-        call.message.text = "/instructions"
-        instructions(call.message)
-    elif cmd == "terms":
-        call.message.text = "/terms"
-        terms(call.message)
-    elif cmd == "about":
-        call.message.text = "/about"
-        about(call.message)
-    bot.answer_callback_query(call.id)
+    bot.send_message(message.chat.id, text, reply_markup=build_main_keyboard())
 
 @bot.message_handler(commands=['create', 'creategc'])
 def create_escrow_group(message: Message):
-    bot.reply_to(message, "/create\nCreating Escrow Group. Please Wait...")
+    user_id = message.from_user.id
+    chat_id = message.chat.id
     
-    client = get_pyro_client()
-    if client is None:
-        bot.reply_to(message, "ERROR: Group creation not configured. Set API_ID, API_HASH, and USER_PHONE in .env")
+    if is_group(message):
+        # Legacy: start escrow in existing group
+        cursor.execute("SELECT status FROM group_escrows WHERE group_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        if row and row[0] not in ('completed', 'cancelled'):
+            return bot.reply_to(message, "An escrow is already active in this group.")
+        cursor.execute("REPLACE INTO group_escrows (group_id, status) VALUES (?, ?)", (chat_id, 'initiated'))
+        conn.commit()
+        bot.reply_to(message, "Escrow started. Use /seller and /buyer to register wallets. Fee: 5% (over $100) or $5 flat (under $100).")
         return
     
-    try:
-        group_code = generate_group_code()
-        group_title = f"Escrow {group_code}"
-        
-        # Create supergroup via Pyrogram user client
-        chat = client.create_supergroup(
-            title=group_title,
-            description="Secure escrow group created by P2PEscrowBot"
-        )
-        
-        chat_id = chat.id
-        
-        # Add bot to the group
-        bot_username = bot.get_me().username
-        client.add_chat_members(chat_id, [bot_username])
-        
-        # Promote bot to admin
-        client.promote_chat_member(
-            chat_id,
-            bot_username,
-            can_change_info=True,
-            can_delete_messages=True,
-            can_invite_users=True,
-            can_pin_messages=True,
-            can_manage_chat=True,
-            can_restrict_members=True,
-            can_promote_members=False
-        )
-        
-        # Generate invite link
-        invite_link = client.export_chat_invite_link(chat_id)
-        
-        # Initialize escrow in DB
-        now = datetime.now().isoformat()
-        cursor.execute("REPLACE INTO group_escrows (group_id, status, created_at) VALUES (?, ?, ?)",
-                       (chat_id, 'initiated', now))
-        conn.commit()
-        
-        response = (
-            f"/create\n"
-            f"Creating Escrow Group. Please Wait...\n\n"
-            f"Created Escrow Group #{group_code}\n\n"
-            f"Group Link: {invite_link}\n\n"
-            f"Now Join this escrow group & Forward this message to buyer/seller.\n\n"
-            f"Enjoy Safe Escrow 🍻"
-        )
-        bot.reply_to(message, response)
-        
-        # Welcome message inside the new group
-        bot.send_message(chat_id, (
-            "Escrow group created.\n\n"
-            "To proceed:\n"
-            "/seller <address>  - Register seller wallet\n"
-            "/buyer <address>   - Register buyer wallet\n"
-            "/asset BTC|LTC|ETH|USDT - Choose asset\n"
-            "/addpin <PIN>      - Set transaction PIN\n"
-            "/status            - View escrow state\n"
-            "/instructions      - Full usage guide"
-        ))
-        
-    except Exception as e:
-        bot.reply_to(message, f"Failed to create escrow group: {str(e)}")
+    bot.reply_to(message, "/create\nCreating Escrow Group. Please Wait...")
+    
+    # Generate group code
+    import random, string
+    group_code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    
+    # Create a placeholder group record
+    # Since bots cannot create groups via Bot API, we generate a virtual escrow session
+    # The user adds the bot to a group manually, then uses /beginescrow
+    
+    cursor.execute("REPLACE INTO group_escrows (group_id, creator_id, status) VALUES (?, ?, 'initiated')",
+                   (chat_id, user_id))
+    conn.commit()
+    
+    response = (
+        f"/create\n"
+        f"Creating Escrow Group. Please Wait...\n\n"
+        f"Created Escrow Group #{group_code}\n\n"
+        f"Group Link: https://t.me/{bot.get_me().username}?startgroup=escrow_{group_code}\n\n"
+        f"Now add the bot to a group with both parties.\n"
+        f"Then use /beginescrow in that group to activate escrow.\n\n"
+        f"Enjoy Safe Escrow."
+    )
+    bot.reply_to(message, response)
 
 @bot.message_handler(commands=['menu'])
 def show_menu(message: Message):
@@ -303,39 +245,36 @@ def show_menu(message: Message):
         "Admin:\n"
         "/adminresolve - Force resolve escrow"
     )
-    bot.reply_to(message, menu)
+    bot.reply_to(message, menu, reply_markup=build_main_keyboard())
 
 @bot.message_handler(commands=['instructions'])
 def instructions(message: Message):
     text = (
-        "P2PEscrowBot - Complete Usage Instructions\n\n"
-        "1. Create Escrow Group\n"
-        "   Run /create in private chat with the bot.\n"
-        "   A new group will be created automatically.\n"
-        "   Share the invite link with the other party.\n\n"
-        "2. Register Wallets\n"
-        "   Seller: /seller 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\n"
-        "   Buyer:  /buyer 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\n\n"
-        "3. Select Asset\n"
-        "   /asset BTC\n"
-        "   /asset USDT\n"
-        "   /asset ETH\n"
-        "   /asset LTC\n\n"
-        "4. Set PIN (Recommended)\n"
-        "   /addpin 123456\n"
-        "   This PIN is required to release funds.\n\n"
-        "5. Fund the Escrow\n"
-        "   Buyer sends funds to the address shown after /asset.\n"
-        "   Verify receipt with /balance.\n\n"
-        "6. Release Funds\n"
-        "   Both parties agree. Buyer runs:\n"
-        "   /releasefund 123456\n\n"
-        "7. Cancel / Dispute\n"
-        "   /cancelescrow - Cancel if deal falls through.\n"
-        "   Contact admin if dispute arises.\n\n"
-        "8. Fees\n"
-        "   5% for amounts over $100.\n"
-        "   $5 flat fee for amounts under $100."
+        "P2P Escrow Bot - Complete Usage Instructions\n\n"
+        "Step 1: Create Escrow Group\n"
+        "  Run /create in private chat with the bot.\n"
+        "  Add the bot to a group chat with the other party.\n"
+        "  Run /beginescrow in the group to activate escrow.\n\n"
+        "Step 2: Register Wallets\n"
+        "  Seller: /seller <wallet_address>\n"
+        "  Buyer: /buyer <wallet_address>\n\n"
+        "Step 3: Select Asset\n"
+        "  /asset BTC | /asset LTC | /asset ETH | /asset USDT\n\n"
+        "Step 4: Set PIN\n"
+        "  /addpin <4-6 digit PIN>\n"
+        "  Required before releasing funds.\n\n"
+        "Step 5: Fund the Escrow\n"
+        "  Buyer sends crypto to the address shown after /asset.\n"
+        "  Verify receipt with /balance.\n\n"
+        "Step 6: Release Funds\n"
+        "  Both parties agree. Buyer runs:\n"
+        "  /releasefund <PIN>\n\n"
+        "Step 7: Cancel or Dispute\n"
+        "  /cancelescrow - Cancel if deal falls through.\n"
+        "  Contact admin for disputes.\n\n"
+        "Fees:\n"
+        "  5% for amounts over $100.\n"
+        "  $5 flat fee for amounts under $100."
     )
     bot.reply_to(message, text)
 
@@ -353,10 +292,8 @@ def terms(message: Message):
         "   Supported assets: BTC, LTC, ETH, USDT (ERC-20).\n"
         "   Funds must be sent to the escrow wallet displayed.\n\n"
         "4. Fees\n"
-        "   Fee structure:\n"
-        "   - 5% of transaction amount for deals over $100.\n"
-        "   - $5 flat fee for deals under $100.\n"
-        "   Fees are deducted before release to seller.\n\n"
+        "   5% of transaction amount for deals over $100.\n"
+        "   $5 flat fee for deals under $100.\n\n"
         "5. Release Protocol\n"
         "   Funds are released only upon mutual agreement.\n"
         "   PIN verification is required for release.\n\n"
@@ -386,39 +323,38 @@ def about(message: Message):
         "Secure escrow service for Telegram P2P trades.\n\n"
         "Created by @streaks100\n\n"
         "Statistics:\n"
-        "   Monthly Users: 3,728\n"
-        "   Deals Completed: 170\n"
-        "   Disputes Resolved: 20\n\n"
+        "  Monthly Users: 3,728\n"
+        "  Deals Completed: 170\n"
+        "  Disputes Resolved: 20\n\n"
         "Features:\n"
-        "   - Automatic group creation\n"
-        "   - Multi-asset support (BTC/LTC/ETH/USDT)\n"
-        "   - PIN-protected releases\n"
-        "   - Admin dispute resolution\n"
-        "   - 24/7 availability\n\n"
-        "Manual fund release with safe admin fallback.\n"
-        "Making P2P trading safer for everyone."
+        "  - Multi-asset support (BTC/LTC/ETH/USDT)\n"
+        "  - PIN-protected releases\n"
+        "  - Admin dispute resolution\n"
+        "  - 24/7 availability\n\n"
+        "Manual fund release with safe admin fallback."
     )
     bot.reply_to(message, text)
 
 @bot.message_handler(commands=['help'])
 def help_command(message: Message):
     text = (
-        "Help Guide\n\n"
+        "P2P Escrow Bot - Help Guide\n\n"
         "Quick Start:\n"
-        "1. /create - Creates a new escrow group\n"
-        "2. Share the invite link with your trade partner\n"
-        "3. /seller <address> - Register as seller\n"
-        "4. /buyer <address> - Register as buyer\n"
-        "5. /asset BTC|LTC|ETH|USDT - Select asset\n"
-        "6. /addpin 123456 - Set your PIN\n"
-        "7. Send funds to escrow wallet\n"
-        "8. /releasefund 123456 - Release when ready\n\n"
+        "  1. /create - Prepare escrow session\n"
+        "  2. Add bot to group with both parties\n"
+        "  3. /beginescrow - Activate escrow in group\n"
+        "  4. /seller <address> - Register seller\n"
+        "  5. /buyer <address> - Register buyer\n"
+        "  6. /asset BTC|LTC|ETH|USDT - Select asset\n"
+        "  7. /addpin <PIN> - Set your PIN\n"
+        "  8. Send funds to escrow wallet\n"
+        "  9. /releasefund <PIN> - Release when ready\n\n"
         "Commands:\n"
-        "/menu - View full command list\n"
-        "/instructions - Detailed step-by-step guide\n"
-        "/terms - Read terms of service\n"
-        "/status - Check current escrow state\n"
-        "/about - Bot information\n\n"
+        "  /menu - View full command list\n"
+        "  /instructions - Detailed step-by-step guide\n"
+        "  /terms - Read terms of service\n"
+        "  /status - Check current escrow state\n"
+        "  /about - Bot information\n\n"
         "Need more help? Contact @streaks100"
     )
     bot.reply_to(message, text)
@@ -426,56 +362,56 @@ def help_command(message: Message):
 @bot.message_handler(commands=['beginescrow'])
 def begin_escrow(message: Message):
     if not is_group(message):
-        return bot.reply_to(message, "Use this command in a group.")
+        return bot.reply_to(message, "Use this command in a group with both parties.")
     
     group_id = message.chat.id
     cursor.execute("SELECT status FROM group_escrows WHERE group_id = ?", (group_id,))
     row = cursor.fetchone()
-    if row and row[0] != 'completed':
+    if row and row[0] not in ('completed', 'cancelled'):
         return bot.reply_to(message, "Escrow already active in this group.")
     
     cursor.execute("REPLACE INTO group_escrows (group_id, status) VALUES (?, ?)", (group_id, 'initiated'))
     conn.commit()
-    bot.reply_to(message, "Escrow started. Use /seller and /buyer to register. 5% for amounts over $100, $5 flat fee for amounts under $100")
+    bot.reply_to(message, "Escrow activated. Use /seller and /buyer to register wallets. Fee: 5% (over $100) or $5 flat (under $100).")
 
 @bot.message_handler(commands=['seller'])
 def register_seller(message: Message):
     parts = message.text.split()
     if len(parts) != 2:
-        return bot.reply_to(message, "Usage: /seller wallet_address")
+        return bot.reply_to(message, "Usage: /seller <wallet_address>")
     seller_id = message.from_user.id
     wallet = parts[1]
     group_id = message.chat.id
     cursor.execute("UPDATE group_escrows SET seller_id = ?, seller_wallet = ? WHERE group_id = ?", 
                    (seller_id, wallet, group_id))
     conn.commit()
-    bot.reply_to(message, f"Seller registered: {message.from_user.first_name}\nWallet: {wallet}")
+    bot.reply_to(message, f"SELLER REGISTERED\n  User: {message.from_user.first_name}\n  Wallet: {wallet}")
 
 @bot.message_handler(commands=['buyer'])
 def register_buyer(message: Message):
     parts = message.text.split()
     if len(parts) != 2:
-        return bot.reply_to(message, "Usage: /buyer wallet_address")
+        return bot.reply_to(message, "Usage: /buyer <wallet_address>")
     buyer_id = message.from_user.id
     wallet = parts[1]
     group_id = message.chat.id
     cursor.execute("UPDATE group_escrows SET buyer_id = ?, buyer_wallet = ? WHERE group_id = ?", 
                    (buyer_id, wallet, group_id))
     conn.commit()
-    bot.reply_to(message, f"Buyer registered: {message.from_user.first_name}\nWallet: {wallet}")
+    bot.reply_to(message, f"BUYER REGISTERED\n  User: {message.from_user.first_name}\n  Wallet: {wallet}")
 
 @bot.message_handler(commands=['asset', 'choose'])
 def choose_asset(message: Message):
     parts = message.text.split()
     if len(parts) != 2:
-        return bot.reply_to(message, f"Usage: /asset COIN\nAvailable: {', '.join(ASSET_WALLETS)}")
+        return bot.reply_to(message, f"Usage: /asset <COIN>\nAvailable: {', '.join(ASSET_WALLETS)}")
     asset = parts[1].upper()
     if asset not in ASSET_WALLETS:
         return bot.reply_to(message, f"Invalid asset. Available: {', '.join(ASSET_WALLETS)}")
     group_id = message.chat.id
     cursor.execute("UPDATE group_escrows SET asset = ? WHERE group_id = ?", (asset, group_id))
     conn.commit()
-    bot.reply_to(message, f"Asset selected: {asset}\nSend funds to:\n{ASSET_WALLETS[asset]}")
+    bot.reply_to(message, f"ASSET SELECTED: {asset}\nSend funds to: {ASSET_WALLETS[asset]}\nAfter sending, use /balance to confirm.")
 
 @bot.message_handler(commands=['addpin'])
 def add_pin(message: Message):
@@ -499,7 +435,7 @@ def add_pin(message: Message):
 def edit_wallet(message: Message):
     parts = message.text.split()
     if len(parts) != 2:
-        return bot.reply_to(message, "Usage: /editwallet NEW_WALLET_ADDRESS")
+        return bot.reply_to(message, "Usage: /editwallet <new_wallet_address>")
     new_wallet = parts[1]
     user_id = message.from_user.id
     group_id = message.chat.id
@@ -513,13 +449,13 @@ def edit_wallet(message: Message):
     if user_id == buyer_id:
         cursor.execute("UPDATE group_escrows SET buyer_wallet = ? WHERE group_id = ?", (new_wallet, group_id))
         conn.commit()
-        return bot.reply_to(message, f"Buyer wallet updated: {new_wallet}")
+        return bot.reply_to(message, f"BUYER WALLET UPDATED\n  New Address: {new_wallet}")
     elif user_id == seller_id:
         cursor.execute("UPDATE group_escrows SET seller_wallet = ? WHERE group_id = ?", (new_wallet, group_id))
         conn.commit()
-        return bot.reply_to(message, f"Seller wallet updated: {new_wallet}")
+        return bot.reply_to(message, f"SELLER WALLET UPDATED\n  New Address: {new_wallet}")
     else:
-        return bot.reply_to(message, "You are not part of this escrow session.")
+        return bot.reply_to(message, "You are not registered as buyer or seller in this escrow.")
 
 @bot.message_handler(commands=['balance'])
 def check_balance(message: Message):
@@ -528,7 +464,7 @@ def check_balance(message: Message):
     row = cursor.fetchone()
     
     if not row or not row[0] or not row[1]:
-        return bot.reply_to(message, "No asset or buyer wallet set.")
+        return bot.reply_to(message, "Asset or buyer wallet not set.")
     
     asset, wallet = row
     balance = get_balance(asset, wallet)
@@ -536,7 +472,13 @@ def check_balance(message: Message):
     if not balance:
         return bot.reply_to(message, f"Failed to fetch balance for {asset}.")
     
-    bot.reply_to(message, f"Escrow Deposit Confirmed\n\nAsset: {asset}\nReceived: {balance} {asset}\n\nOnce both parties agree, use /releasefund to complete the deal.")
+    bot.reply_to(message,
+        f"BALANCE CHECK\n"
+        f"  Asset: {asset}\n"
+        f"  Wallet: {wallet}\n"
+        f"  Balance: {balance} {asset}\n\n"
+        f"Use /releasefund <PIN> to release funds when both parties agree."
+    )
 
 @bot.message_handler(commands=['releasefund'])
 def release_funds(message: Message):
@@ -567,14 +509,15 @@ def release_funds(message: Message):
         return bot.reply_to(message, "Invalid PIN. Funds not released.")
     
     cursor.execute("UPDATE group_escrows SET status = 'completed' WHERE group_id = ?", (group_id,))
+    cursor.execute("INSERT INTO escrow_history (group_id, asset, status, completed_at) VALUES (?, ?, 'completed', datetime('now'))", (group_id, asset))
     conn.commit()
     
-    bot.reply_to(message, f"Funds released to seller:\nWallet: {seller_wallet}\nAsset: {asset}")
+    bot.reply_to(message, f"FUNDS RELEASED\n  Seller Wallet: {seller_wallet}\n  Asset: {asset}\n\nTransaction complete.")
 
 @bot.message_handler(commands=['adminresolve'])
 def admin_force_release(message: Message):
     if message.from_user.id != ADMIN_ID:
-        return bot.reply_to(message, "Only admin can do this.")
+        return bot.reply_to(message, "This command is restricted to the bot administrator.")
     group_id = message.chat.id
     cursor.execute("DELETE FROM group_escrows WHERE group_id = ?", (group_id,))
     conn.commit()
@@ -590,19 +533,17 @@ def view_status(message: Message):
     
     buyer_wallet, seller_wallet, asset, status, created_at = row
     buyer_balance = get_balance(asset, buyer_wallet) if buyer_wallet and asset else "N/A"
-    seller_balance = get_balance(asset, seller_wallet) if seller_wallet and asset else "N/A"
 
-    status_message = (
-        "Escrow Status\n\n"
-        f"State: {status}\n"
-        f"Asset: {asset or 'Not selected'}\n"
-        f"Created: {created_at or 'N/A'}\n\n"
-        f"Buyer Wallet: {buyer_wallet or 'Not set'}\n"
-        f"  Balance: {buyer_balance}\n\n"
-        f"Seller Wallet: {seller_wallet or 'Not set'}\n"
-        f"  Balance: {seller_balance}"
+    bot.reply_to(message,
+        f"ESCROW STATUS\n\n"
+        f"  State: {status.upper()}\n"
+        f"  Asset: {asset or 'Not selected'}\n"
+        f"  Created: {created_at or 'N/A'}\n\n"
+        f"  Buyer Wallet: {buyer_wallet or 'Not set'}\n"
+        f"    Balance: {buyer_balance}\n\n"
+        f"  Seller Wallet: {seller_wallet or 'Not set'}\n\n"
+        f"Use /menu to see available commands."
     )
-    bot.reply_to(message, status_message)
 
 @bot.message_handler(commands=['cancelescrow'])
 def cancel_escrow(message: Message):
@@ -617,7 +558,7 @@ def cancel_escrow(message: Message):
 
     cursor.execute("DELETE FROM group_escrows WHERE group_id = ?", (group_id,))
     conn.commit()
-    bot.reply_to(message, "Escrow session cancelled.")
+    bot.reply_to(message, "ESCROW CANCELLED\n\nThis escrow session has been terminated. No funds have been released.")
 
 # === Webhook Setup ===
 @app.route('/', methods=['GET'])
